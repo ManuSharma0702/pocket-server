@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS filehash (
+    id SERIAL PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    file_path TEXT NOT NULL UNIQUE,
+    file_hash TEXT NOT NULL,
+    file_size BIGINT NOT NULL,
+    modified_time TIMESTAMP NOT NULL
+);

@@ -1,0 +1,23 @@
+services:
+  app:
+    container_name: pocket_server_app
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgres://user:password@db:5432/pocket_server_db
+    
+  db:
+    image: postgres:15
+    container_name: db
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: pocket_server_db
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+volumes:
+  pg_data:
