@@ -76,6 +76,7 @@ async fn main() {
 }
 
 async fn root() -> &'static str {
+     println!("ROOT HIT");
     "Pocket Drive is running!"
 }
 
@@ -83,6 +84,7 @@ async fn handle_sync(
     State(pool): State<PgPool>,
     Json(payload): Json<FileSyncPayload>,
 ) -> impl IntoResponse {
+    println!("SYNCING");
     let mut response: SyncResponse = HashMap::new();
 
     for (cmd, files) in payload {
@@ -170,18 +172,22 @@ async fn handle_sync(
         }
         response.insert(cmd, OperationResult { success, failure });
     }
+
+    println!("SYNCED");
     (StatusCode::ACCEPTED, Json(response))
 }
 
 async fn handle_get_all(
     State(pool): State<PgPool>,
 ) -> impl IntoResponse {
+    println!("FETCHING");
     let result = sqlx::query_as::<_, FileEntry>(
         "SELECT file_path, file_hash, file_size, modified_time FROM filehash"
     )
     .fetch_all(&pool)
     .await;
 
+    println!("FETCHED");
     match result {
         Ok(rows) => (
             StatusCode::OK,
