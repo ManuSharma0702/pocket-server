@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env};
 
 use axum::{
-    extract::State,
+    extract::{ State , Multipart},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -82,9 +82,39 @@ async fn root() -> &'static str {
 
 async fn handle_sync(
     State(pool): State<PgPool>,
-    Json(payload): Json<FileSyncPayload>,
+    mut multipart: Multipart,
 ) -> impl IntoResponse {
+    let mut payload: Option<FileSyncPayload> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("");
+
+        if name == "payload" {
+            let text = field.text().await.unwrap();
+            payload = Some(serde_json::from_str(&text).unwrap());
+        } 
+        else if name == "files" {
+            let filename = field
+                .file_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let data = field.bytes().await.unwrap();
+
+            println!("Received file: {} ({} bytes)", filename, data.len());
+
+            // TODO: save file if needed
+        }
+    }
+
+    let payload = match payload {
+        Some(p) => p,
+        None => return (StatusCode::BAD_REQUEST, "Missing payload").into_response(),
+    };
+
+    // ---- your existing logic continues here ----
     println!("SYNCING");
+
     let mut response: SyncResponse = HashMap::new();
 
     for (cmd, files) in payload {
@@ -174,7 +204,7 @@ async fn handle_sync(
     }
 
     println!("SYNCED");
-    (StatusCode::ACCEPTED, Json(response))
+    (StatusCode::ACCEPTED, Json(response)).into_response()
 }
 
 async fn handle_get_all(
