@@ -5,5 +5,6 @@ CREATE TABLE IF NOT EXISTS filehash (
     file_path TEXT NOT NULL UNIQUE,
     file_hash TEXT NOT NULL,
     file_size BIGINT NOT NULL,
-    modified_time BIGINT NOT NULL
+    modified_time BIGINT NOT NULL,
+    system_path TEXT NOT NULL UNIQUE
 );

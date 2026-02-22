@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env};
+use std::{collections::HashMap, env, fs::{self, File}, io::Write};
 
 use axum::{
     extract::{ State , Multipart},
@@ -20,6 +20,7 @@ enum Operation {
 
 #[derive(Deserialize, Serialize, Debug, FromRow)]
 struct FileEntry {
+    file_name: String,
     file_path: String,
     file_hash: Option<String>,
     file_size: i64,
@@ -52,6 +53,7 @@ struct GetAllResponse {
 #[tokio::main]
 async fn main() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    fs::create_dir_all("/data").unwrap();
 
     let pool = PgPoolOptions::new()
         .connect(&db_url)
@@ -102,8 +104,10 @@ async fn handle_sync(
             let data = field.bytes().await.unwrap();
 
             println!("Received file: {} ({} bytes)", filename, data.len());
-
-            // TODO: save file if needed
+            let system_path = generate_system_path(&filename);
+            let mut file = File::create(&system_path).unwrap();
+            file.write_all(&data).unwrap();
+            println!("File written into: {}", system_path);
         }
     }
 
@@ -123,17 +127,19 @@ async fn handle_sync(
         match cmd {
             Operation::Insert => {
                 for file in files {
+                    let filename = generate_system_path(&file.file_name);
                     let data = sqlx::query_as::<_, FileEntry>(
                         r#"
-                        INSERT INTO filehash (file_path, file_hash, file_size, modified_time)
-                        VALUES ($1, $2, $3, $4)
-                        RETURNING file_path, file_hash, file_size, modified_time
+                        INSERT INTO filehash (file_path, file_hash, file_size, modified_time, system_path)
+                        VALUES ($1, $2, $3, $4, $5)
+                        RETURNING file_path, file_hash, file_size, modified_time, system_path AS file_name
                         "#,
                     )
                     .bind(file.file_path.clone())
                     .bind(file.file_hash)
                     .bind(file.file_size)
                     .bind(file.modified_time)
+                    .bind(filename)
                     .fetch_one(&pool)
                     .await;
 
@@ -158,7 +164,7 @@ async fn handle_sync(
                             file_size = $2,
                             modified_time = $3
                         WHERE file_path = $4
-                        RETURNING file_path, file_hash, file_size, modified_time
+                        RETURNING file_path, file_hash, file_size, modified_time, system_path AS file_name
                         "#,
                     )
                     .bind(file.file_hash)
@@ -180,18 +186,30 @@ async fn handle_sync(
 
             Operation::Delete => {
                 for file in files {
-                    let data = sqlx::query(
+                    let data = sqlx::query_scalar::<_, String>(
                         r#"
                         DELETE FROM filehash
                         WHERE file_path = $1
-                        "#,
+                        RETURNING system_path
+                        "#
                     )
                     .bind(file.file_path.clone())
-                    .execute(&pool)
+                    .fetch_optional(&pool)
                     .await;
 
                     match data {
-                        Ok(_) => success.push(file),
+                        Ok(Some(system_path)) => {
+                            match fs::remove_file(&system_path) {
+                                Ok(_) => success.push(file),
+                                Err(e) => failure.push(FileFailure {
+                                    file_path: file.file_path,
+                                    error: format!("File delete failed: {}", e),
+                                }),
+                            }
+                        },
+                        Ok(None) => {
+                            failure.push(FileFailure { file_path: file.file_path, error: "file not found in DB" .into() });
+                        }
                         Err(e) => failure.push(FileFailure {
                             file_path: file.file_path,
                             error: e.to_string(),
@@ -212,7 +230,7 @@ async fn handle_get_all(
 ) -> impl IntoResponse {
     println!("FETCHING");
     let result = sqlx::query_as::<_, FileEntry>(
-        "SELECT file_path, file_hash, file_size, modified_time FROM filehash"
+        "SELECT file_path, file_hash, file_size, modified_time, system_path AS file_name FROM filehash"
     )
     .fetch_all(&pool)
     .await;
@@ -236,3 +254,8 @@ async fn handle_get_all(
     }
 }
 
+fn generate_system_path(filename: &str) -> String {
+    let mut s = String::from("/data/");
+    s.push_str(filename);
+    s
+}

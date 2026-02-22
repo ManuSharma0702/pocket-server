@@ -6,6 +6,8 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgres://user:password@db:5432/pocket_server_db
+    volumes:
+      - rust_data:/data
     
   db:
     image: postgres:15
@@ -21,3 +23,4 @@ services:
 
 volumes:
   pg_data:
+  rust_data:
