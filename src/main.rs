@@ -69,7 +69,12 @@ async fn main() {
         .route("/download", get(handle_file_download))
         .with_state(pool);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000")
+    let port = std::env::var("PORT")
+        .unwrap_or_else(|_| "8000".to_string());
+
+    let addr = format!("0.0.0.0:{}", port);
+
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap();
 
