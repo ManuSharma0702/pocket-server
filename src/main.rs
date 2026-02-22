@@ -78,7 +78,7 @@ async fn main() {
         .await
         .unwrap();
 
-    println!("Server running on http://0.0.0.0:8000");
+    println!("Server running on {}", addr);
 
     axum::serve(listener, app).await.unwrap();
 }
