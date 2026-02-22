@@ -1,8 +1,8 @@
 use std::{collections::HashMap, env, fs::{self, File}, io::Write};
 
 use axum::{
-    extract::{ State , Multipart},
-    http::StatusCode,
+    extract::{ Multipart, Query, State},
+    http::{header, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -66,6 +66,7 @@ async fn main() {
         .route("/", get(root))
         .route("/sync", post(handle_sync))
         .route("/get", get(handle_get_all))
+        .route("/download", get(handle_file_download))
         .with_state(pool);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000")
@@ -251,6 +252,35 @@ async fn handle_get_all(
                 error: Some(err.to_string()),
             }),
         ),
+    }
+}
+
+async fn handle_file_download(
+    Query(system_path): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+
+    let path = match system_path.get("path") {
+        Some(p) => p,
+        None => return (StatusCode::BAD_REQUEST, "Missing path").into_response(),
+    };
+
+    if !path.starts_with("/data/") {
+        return (StatusCode::FORBIDDEN, "Invalid path").into_response();
+    }
+
+    match fs::read(path) {
+        Ok(data) => {
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream"),
+                ],
+                data,
+            ).into_response()
+        }
+        Err(_) => {
+            (StatusCode::NOT_FOUND, "File not found").into_response()
+        }
     }
 }
 
