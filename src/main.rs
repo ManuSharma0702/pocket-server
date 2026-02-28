@@ -1,4 +1,6 @@
-use std::{collections::HashMap, env, fs::{self, File}, io::Write};
+use std::{collections::HashMap, env, fs::{self, File}, io::Write, time::Duration};
+use aws_sdk_s3::{self as s3, presigning::PresigningConfig, primitives::ByteStream, Client};
+
 
 use axum::{
     extract::{ Multipart, Query, State},
@@ -50,9 +52,25 @@ struct GetAllResponse {
     error: Option<String>,
 }
 
+#[derive(Clone)]
+struct AppState{
+    pool: PgPool,
+    s3client: Client
+}
+
 #[tokio::main]
 async fn main() {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let config = aws_config::load_from_env().await;
+    let client = s3::Client::new(&config);
+    
+    let list_buckets_output = client.list_buckets().send().await.unwrap();
+    if let Some(buckets) = list_buckets_output.buckets {
+        for bucket in buckets {
+            println!("Bucket name: {:?}", bucket.name());
+        }
+    }
+
     fs::create_dir_all("/data").unwrap();
 
     let pool = PgPoolOptions::new()
@@ -62,12 +80,14 @@ async fn main() {
 
     sqlx::migrate!().run(&pool).await.expect("Migrations failed");
 
+    let appstate = AppState { pool, s3client: client };
+
     let app = Router::new()
         .route("/", get(root))
         .route("/sync", post(handle_sync))
         .route("/get", get(handle_get_all))
         .route("/download", get(handle_file_download))
-        .with_state(pool);
+        .with_state(appstate);
 
     let port = std::env::var("PORT")
         .unwrap_or_else(|_| "8000".to_string());
@@ -89,7 +109,7 @@ async fn root() -> &'static str {
 }
 
 async fn handle_sync(
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     let mut payload: Option<FileSyncPayload> = None;
@@ -110,10 +130,19 @@ async fn handle_sync(
             let data = field.bytes().await.unwrap();
 
             println!("Received file: {} ({} bytes)", filename, data.len());
-            let system_path = generate_system_path(&filename);
-            let mut file = File::create(&system_path).unwrap();
-            file.write_all(&data).unwrap();
-            println!("File written into: {}", system_path);
+            let key = generate_system_path(&filename);
+            state.s3client
+                .put_object()
+                .bucket("pocket-directory")
+                .key(&key)
+                .body(ByteStream::from(data.to_vec()))
+                .content_type("application/octet-stream")
+                .send()
+                .await
+                .unwrap();
+
+            //Instead of saving, save the file to s3
+            println!("Uploaded to S3 with key: {}", key);
         }
     }
 
@@ -146,7 +175,7 @@ async fn handle_sync(
                     .bind(file.file_size)
                     .bind(file.modified_time)
                     .bind(filename)
-                    .fetch_one(&pool)
+                    .fetch_one(&state.pool)
                     .await;
 
                     match data {
@@ -177,7 +206,7 @@ async fn handle_sync(
                     .bind(file.file_size)
                     .bind(file.modified_time)
                     .bind(file.file_path.clone())
-                    .fetch_one(&pool)
+                    .fetch_one(&state.pool)
                     .await;
 
                     match data {
@@ -200,12 +229,17 @@ async fn handle_sync(
                         "#
                     )
                     .bind(file.file_path.clone())
-                    .fetch_optional(&pool)
+                    .fetch_optional(&state.pool)
                     .await;
 
                     match data {
                         Ok(Some(system_path)) => {
-                            match fs::remove_file(&system_path) {
+                            match state.s3client
+                                .delete_object()
+                                .bucket("pocket-directory")
+                                .key(&system_path)
+                                .send()
+                                .await {
                                 Ok(_) => success.push(file),
                                 Err(e) => failure.push(FileFailure {
                                     file_path: file.file_path,
@@ -232,13 +266,13 @@ async fn handle_sync(
 }
 
 async fn handle_get_all(
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
     println!("FETCHING");
     let result = sqlx::query_as::<_, FileEntry>(
         "SELECT file_path, file_hash, file_size, modified_time, system_path AS file_name FROM filehash"
     )
-    .fetch_all(&pool)
+    .fetch_all(&state.pool)
     .await;
 
     println!("FETCHED");
@@ -261,36 +295,52 @@ async fn handle_get_all(
 }
 
 async fn handle_file_download(
-    Query(system_path): Query<std::collections::HashMap<String, String>>,
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
 
-    let path = match system_path.get("path") {
-        Some(p) => p,
-        None => return (StatusCode::BAD_REQUEST, "Missing path").into_response(),
+    let key = match params.get("path") {
+        Some(k) => k,
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "Missing path"
+        }))).into_response(),
     };
 
-    if !path.starts_with("/data/") {
-        return (StatusCode::FORBIDDEN, "Invalid path").into_response();
-    }
-
-    match fs::read(path) {
-        Ok(data) => {
-            (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, "application/octet-stream"),
-                ],
-                data,
+    let presigned_request = match state.s3client
+        .get_object()
+        .bucket("pocket-directory")
+        .key(key)
+        .presigned(
+            PresigningConfig::expires_in(Duration::from_secs(300))
+                .unwrap()
+        )
+        .await
+    {
+        Ok(req) => req,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to generate URL: {}", e)
+                }))
             ).into_response()
         }
-        Err(_) => {
-            (StatusCode::NOT_FOUND, "File not found").into_response()
-        }
-    }
+    };
+
+    let url = presigned_request.uri().to_string();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "url": url,
+            "expires_in_seconds": 300
+        }))
+    ).into_response()
 }
 
+
 fn generate_system_path(filename: &str) -> String {
-    let mut s = String::from("/data/");
+    let mut s = String::from("data/");
     s.push_str(filename);
     s
 }
